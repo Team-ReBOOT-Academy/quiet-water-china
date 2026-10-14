@@ -1,228 +1,228 @@
-# Quiet Water (`quiet-water`) — trading strategy service intent
+# Quiet Water（`quiet-water`）—— 交易策略服务意图
 
-Author: **llnightll**  
-Platform: OmSU instructor stand [Teacher Trading Platform](https://omsu.7bits.it/)  
-Service identifier (`service`, future `producer` / `strategyId`): `quiet-water`  
-Scaffold stack: **Cangjie 1.2.0 + `cjpm` + HTTP on `std.net`** (no implementation code in this document — intent only)
+作者：**llnightll**  
+平台：鄂木斯克国立大学教师实验台 [Teacher Trading Platform](https://omsu.7bits.it/)  
+服务标识（`service`，未来的 `producer` / `strategyId`）：`quiet-water`  
+脚手架技术栈：**Cangjie 1.2.0 + `cjpm` + 基于 `std.net` 的 HTTP**（本文不含实现代码，只写意图）
 
-This document lives in Git next to the code and is versioned with it. It covers assignment 1: project definition, boundaries, interactions, composition, roles, and tools.
+本文档与代码同仓库、同版本管理。覆盖作业 1：项目定义、边界、交互、组成、角色与工具。
 
-Contents:
+目录：
 
-1. [Project definition](#1-project-definition)
-2. [Project boundaries](#2-project-boundaries)
-3. [Interactions with external systems](#3-interactions-with-external-systems)
-4. [Solution composition](#4-solution-composition)
-5. [Roles and responsibility](#5-roles-and-responsibility)
-6. [Tooling choices](#6-tooling-choices)
+1. [项目定义](#1-项目定义)
+2. [项目边界](#2-项目边界)
+3. [与外部系统的交互](#3-与外部系统的交互)
+4. [方案组成](#4-方案组成)
+5. [角色与职责](#5-角色与职责)
+6. [工具选择](#6-工具选择)
 
 ---
 
-## 1. Project definition
+## 1. 项目定义
 
-### Name and purpose
+### 名称与目的
 
-**Quiet Water** is a student *strategy-service*. It sits **outside** the instructor platform and answers every closed candle of a run with one decision: `BUY`, `SELL`, or `HOLD`.
+**Quiet Water** 是学生 *strategy-service*。它位于教师平台**外部**，对一次运行中的每一根已收盘K线给出一个决策：`BUY`、`SELL` 或 `HOLD`。
 
-The service is not an exchange, not a broker, and not a student cabinet. It does not execute orders and does not compute a virtual portfolio: that is the platform’s zone. Its zone is **a decision for one candle** and compliance with the event contract.
+本服务不是交易所、不是经纪商、也不是学生柜面。它不下单，也不计算虚拟投资组合：那是平台的职责。它的职责是**对一根K线给出决策**，并遵守事件契约。
 
-### Trading idea under test
+### 待检验的交易想法
 
-Hypothesis: on MOEX one-minute candles a raw setup (RSI reversal) produces too many false entries. It is worth trading only when two conditions hold at the same time:
+假设：在 MOEX 一分钟K线上，单纯形态（RSI 反转）会产生过多虚假入场。只有同时满足两个条件时才值得交易：
 
-1. the closed bar has a **price setup**;
-2. in a recent window the same setups **worked more often than not** (success formula / counter).
+1. 已收盘K线具有**价格形态**；
+2. 在近期窗口内，同类形态**成功多于失败**（成功公式 / 计数器）。
 
-While there is not enough data, the service **stays silent**. Hence the name: quiet water first; a strike only after the exam.
+数据不足时，服务**保持沉默**。因此得名：先静水，考试通过后再出手。
 
-The algorithm is **walk-forward**, three phases per instrument:
+算法是 **walk-forward**，每个标的三个阶段：
 
-| Phase | Candles | What the service does | Outbound signal |
+| 阶段 | K线 | 服务做什么 | 对外信号 |
 |---|---|---|---|
-| A. Collect | `1 … N` | accumulates OHLC, computes the success formula on this stretch | `HOLD` only |
-| B. Exam | `N+1 … N+K` | applies the formula **without fitting** and checks it against the outcome after `M` bars | `HOLD` only |
-| C. Trade | thereafter | slides the window by one candle, recomputes the score, trades when the pass mark is met | `BUY` / `SELL` / `HOLD` |
+| A. 收集 | `1 … N` | 累积 OHLC，在这段上计算成功公式 | 仅 `HOLD` |
+| B. 考试 | `N+1 … N+K` | **不再拟合**地套用公式，并用 `M` 根之后的结果核对 | 仅 `HOLD` |
+| C. 交易 | 其后 | 窗口每次滑动一根K线，重算分数，达到及格分才交易 | `BUY` / `SELL` / `HOLD` |
 
-If the live score drops, a **circuit breaker** turns on: `HOLD` again and one new exam on the next `K` bars. A full `K` quarantine is **not** repeated on every step of phase C — otherwise the service would almost never enter the market.
+若实时分数下降，则打开**熔断**：重新 `HOLD`，并对接下来的 `K` 根做一次新考试。阶段 C 的每一步**不会**重复完整的 `K` 隔离，否则服务几乎永远无法入场。
 
-**Setup (deterministic rule).** Mean-reversion on RSI(14):
+**形态（确定性规则）。** RSI(14) 均值回归：
 
-- `BUY` candidate: RSI was below the oversold zone and the current candle close is above the previous close;
-- `SELL` candidate: RSI was above the overbought zone and the close is below the previous close;
-- otherwise there is no setup → `HOLD`.
+- `BUY` 候选：RSI 曾低于超卖区，且当前收盘价高于前一根收盘价；
+- `SELL` 候选：RSI 曾高于超买区，且收盘价低于前一根收盘价；
+- 否则没有形态 → `HOLD`。
 
-**Success formula.** When such a setup already occurred, look at price after `M` candles:
+**成功公式。** 当该形态已经出现过，观察 `M` 根K线之后的价格：
 
-- BUY succeeds if `close[t+M] > close[t]`;
-- SELL succeeds if `close[t+M] < close[t]`.
+- BUY 成功，若 `close[t+M] > close[t]`；
+- SELL 成功，若 `close[t+M] < close[t]`。
 
-`successRate = successes / W` over the last completed setups of the same direction.
+`successRate = successes / W`，统计最近已完成的同方向形态。
 
-**Decision in phase C:**
+**阶段 C 的决策：**
 
-- there is a setup and `successRate ≥ T` and the exam is passed → the setup side;
-- otherwise → `HOLD`.
+- 有形态且 `successRate ≥ T` 且考试已通过 → 形态方向；
+- 否则 → `HOLD`。
 
-Starting parameters (all from environment variables, not literals in code):
+起始参数（全部来自环境变量，不在代码中写死字面量）：
 
-| Parameter | Meaning | Starting value |
+| 参数 | 含义 | 起始值 |
 |---|---|---|
-| `N` | training-window length | 90 |
-| `K` | exam length | 45 |
-| `M` | success-check horizon | 10 |
-| `W` | how many past setups enter the score | 20 |
-| `T` | pass mark | 0.55 |
-| `RSI_PERIOD` | RSI period | 14 |
-| `RSI_OVERSOLD` / `RSI_OVERBOUGHT` | setup zones | 30 / 70 |
+| `N` | 训练窗口长度 | 90 |
+| `K` | 考试长度 | 45 |
+| `M` | 成功检查视界 | 10 |
+| `W` | 计入分数的历史形态数量 | 20 |
+| `T` | 及格分 | 0.55 |
+| `RSI_PERIOD` | RSI 周期 | 14 |
+| `RSI_OVERSOLD` / `RSI_OVERBOUGHT` | 形态区间 | 30 / 70 |
 
-Bar `t` success is visible only at `t+M`. The last `M` exam bars do not count — otherwise that would be looking into the future.
+K线 `t` 的成败要到 `t+M` 才可见。考试段最后 `M` 根不计入 —— 否则就是偷看未来。
 
-**Star (not on the critical path).** After a recommendation is sent, a background adjustment may slightly shift the **next** bar’s `confidence` (for example within ±0.05). It does not change the trade side (`BUY`/`SELL`). Numerical correlation and hit-rate are computed by the service code, not by a language model. If the model is late or unavailable, the contribution is zero.
+**星星（不在关键路径上）。** 推荐发出之后，后台微调可以略微移动**下一根**K线的 `confidence`（例如 ±0.05 以内）。它不改变交易方向（`BUY`/`SELL`）。数值相关与命中率由服务代码计算，不由语言模型计算。模型迟到或不可用时，贡献为零。
 
-### Problem being solved
+### 要解决的问题
 
-The platform requires an answer on **every** closed candle, with a strict binding of `runId` / `sourceEventId` / `instrument` / `sequenceNumber`. On a 1-minute realtime run you cannot:
+平台要求对**每一根**已收盘K线给出回答，并严格绑定 `runId` / `sourceEventId` / `instrument` / `sequenceNumber`。在 1 分钟实时运行中不能：
 
-- trade every bar;
-- fit the formula on the same candles used for evaluation;
-- put an external LLM into the decision loop (latency, non-determinism, future idempotency).
+- 每根都交易；
+- 在用于评估的同一批K线上拟合公式；
+- 把外部 LLM 放进决策回路（延迟、非确定性、未来幂等性）。
 
-The service must be able to stay silent, pass an exam on a delayed window, and remain reproducible.
+服务必须能保持沉默、在延迟窗口上通过考试，并且可复现。
 
-### Goals
+### 目标
 
-1. Fix the service’s place: outside the platform, via Kafka, without a UI.
-2. Test one hypothesis: setup + pass mark, not “a model guesses the market”.
-3. Meet the course contract: health, configuration from the environment, a container, documentation in Git.
+1. 固定服务位置：平台外部、经 Kafka、没有 UI。
+2. 检验一个假设：形态 + 及格分，而不是「模型猜市场」。
+3. 满足课程契约：健康检查、配置来自环境、容器、文档在 Git 中。
 
-### Main tasks
+### 主要任务
 
-1. Keep, per ticker, its own candle window and phase (`LEARN` / `EXAM` / `TRADE` / `HALT`).
-2. Compute the RSI setup and a rolling `successRate` without looking into the future.
-3. Publish one recommendation per candle in the platform contract.
-4. Serve `GET /health` without authorization.
-5. Read secrets and thresholds only from environment variables.
+1. 按标的保存自己的K线窗口与阶段（`LEARN` / `EXAM` / `TRADE` / `HALT`）。
+2. 计算 RSI 形态与滚动 `successRate`，不偷看未来。
+3. 按平台契约为每根K线发布一条推荐。
+4. 提供无需授权的 `GET /health`。
+5. 密钥与阈值只从环境变量读取。
 
-### Expected result
+### 预期结果
 
-- this document in Git;
-- a runnable Cangjie scaffold: the process starts, shuts down cleanly, `GET /health` returns HTTP 200;
-- a README that lets you build and run the service without an IDE;
-- on later assignments — Kafka wiring and phases A–C in the live cycle.
+- Git 中有本文档；
+- 可运行的 Cangjie 脚手架：进程能启动、干净退出，`GET /health` 返回 HTTP 200；
+- README 使人能在不使用 IDE 的情况下构建并运行服务；
+- 后续作业 —— 接入 Kafka，并在实盘周期中实现阶段 A–C。
 
-Right now (assignment 1) the algorithm **does not trade** at runtime: the scaffold starts HTTP and reports that the broker is not configured (`DEGRADED`). The algorithm intent is already fixed so later stages do not break it.
+当前（作业 1）算法在运行时**不交易**：脚手架启动 HTTP，并报告经纪人未配置（`DEGRADED`）。算法意图已经写死，以免后续阶段破坏它。
 
 ---
 
-## 2. Project boundaries
+## 2. 项目边界
 
-### In scope
+### 范围内
 
-- ingest of a closed candle (once Kafka exists) and a short in-process window;
-- setup calculation, success formula, walk-forward phases;
-- publishing a trade recommendation;
-- HTTP diagnostics `GET /health`;
-- configuration via the environment;
-- clean process shutdown (SIGTERM in a container).
+- 已收盘K线的接入（Kafka 就绪之后）以及进程内短窗口；
+- 形态计算、成功公式、walk-forward 阶段；
+- 发布交易推荐；
+- HTTP 诊断 `GET /health`；
+- 通过环境配置；
+- 进程干净退出（容器中的 SIGTERM）。
 
-### Explicitly out of scope
+### 明确不在范围内
 
-| What | Who owns it |
+| 内容 | 由谁负责 |
 |---|---|
-| Starting and stopping replay, choosing instruments and timeframe | instructor platform |
-| Market-data supply | platform’s external vendor, not the student |
-| Virtual execution, fees, portfolio, groups | platform |
-| Dashboard UI, practice, course documentation | platform (`omsu.7bits.it`) |
-| Real broker orders | nobody on this stand: the platform does not send them |
-| Issuing the Kafka login, `secretKey`, topic name | instructor |
-| Submitting homework through a UI form | there is no such form; submission = Git + a working service |
-| LLM training and online fine-tuning on the current run | not in scope |
+| 启动与停止回放、选择标的与周期 | 教师平台 |
+| 行情供给 | 平台的外部供应商，不是学生 |
+| 虚拟成交、手续费、投资组合、小组 | 平台 |
+| 仪表盘 UI、练习、课程文档 | 平台（`omsu.7bits.it`） |
+| 真实经纪商订单 | 本实验台上无人负责：平台不发送它们 |
+| 发放 Kafka 登录、`secretKey`、主题名 | 教师 |
+| 通过 UI 表单提交作业 | 没有这种表单；提交 = Git + 可运行的服务 |
+| 在当前运行上训练 LLM 与在线微调 | 不在范围内 |
 
-### Data and decisions the service controls
+### 服务控制的数据与决策
 
-Controls:
+控制：
 
-- its `signal` and `confidence` for a specific candle;
-- `suggestedQuantity` (0 on `HOLD` / warmup / exam, 1 on entry);
-- `dataQuality` and `reason` / `metadata` text;
-- its own Kafka consumer `group.id`;
-- process readiness (health).
+- 针对特定K线的 `signal` 与 `confidence`；
+- `suggestedQuantity`（`HOLD` / 预热 / 考试为 0，入场为 1）；
+- `dataQuality` 以及 `reason` / `metadata` 文本；
+- 自己的 Kafka 消费者 `group.id`；
+- 进程就绪（health）。
 
-Does not control:
+不控制：
 
-- whether the platform consensus window converges;
-- whether the recommendation is executed;
-- how portfolio value changes;
-- which tickers the instructor included in the run.
+- 平台共识窗口是否收敛；
+- 推荐是否被执行；
+- 投资组合价值如何变化；
+- 教师在本次运行中纳入了哪些标的。
 
-### Who it interacts with
+### 与谁交互
 
-| Party | Type | Needed already in assignment 1? |
+| 一方 | 类型 | 作业 1 是否已需要？ |
 |---|---|---|
-| Student developer (`llnightll`) | person | yes: run, read logs |
-| Instructor | person, stand owner | yes: will issue the broker later |
-| Teacher Trading Platform | external IS | yes as a counterpart in meaning; network — from the next assignment |
-| Apache Kafka of the course stand | broker | in the boundaries, not wired in the scaffold |
-| Language model (star) | external HTTP API | optional on later stages only |
-| Browser / curl | health client | yes |
+| 学生开发者（`llnightll`） | 人 | 是：运行、读日志 |
+| 教师 | 人，实验台所有者 | 是：稍后发放经纪人 |
+| Teacher Trading Platform | 外部信息系统 | 意义上已是对手方；网络 —— 从下一份作业开始 |
+| 课程实验台的 Apache Kafka | 经纪人 | 在边界内，脚手架尚未接入 |
+| 语言模型（星星） | 外部 HTTP API | 仅后续阶段可选 |
+| 浏览器 / curl | 健康检查客户端 | 是 |
 
-The service has no “cabinet” users. The only machine HTTP client is liveness/readiness probes (instructor, Docker, the developer).
+本服务没有「柜面」用户。唯一的机器 HTTP 客户端是存活/就绪探针（教师、Docker、开发者）。
 
 ---
 
-## 3. Interactions with external systems
+## 3. 与外部系统的交互
 
-### 3.1. Instructor platform + Kafka
+### 3.1. 教师平台 + Kafka
 
-The platform talks to the student service **not over REST**, but via events in a protected Kafka.
+平台与学生服务**不是通过 REST** 通信，而是通过受保护 Kafka 中的事件。
 
-**Known from stand documentation (checked 2026-10-11):**
+**来自实验台文档（已于 2026-10-11 核对）：**
 
-- protocol: `SASL_SSL`, mechanism `SCRAM-SHA-512`;
-- instructor-issued parameters: `bootstrap.servers`, login, password, candle topic name, CA if required;
-- the active stand run was `REALTIME`, timeframe `1m`, topic like `market.candle.internal`;
-- run instruments: `SBER`, `T`, `TATN`, `GAZP`, `MAGN`, `MOEX`, `OZON`;
-- outbound recommendation event type: `strategy.recommendation.created`, `schemaVersion` `1.0`;
-- candle → recommendation link: `sourceEventId`, `runId`, `instrument`, `sequenceNumber`.
+- 协议：`SASL_SSL`，机制 `SCRAM-SHA-512`；
+- 教师发放的参数：`bootstrap.servers`、登录、密码、K线主题名、必要时的 CA；
+- 当时活动的实验台运行为 `REALTIME`，周期 `1m`，主题类似 `market.candle.internal`；
+- 运行标的：`SBER`、`T`、`TATN`、`GAZP`、`MAGN`、`MOEX`、`OZON`；
+- 出站推荐事件类型：`strategy.recommendation.created`，`schemaVersion` `1.0`；
+- K线与推荐的绑定：`sourceEventId`、`runId`、`instrument`、`sequenceNumber`。
 
-**Inbound (when the broker exists).** Closed-candle event. Expected envelope fields: `eventId`, `eventType`, `schemaVersion`, `occurredAt`, `correlationId`, `causationId`, `producer`, `payload` (instrument, OHLC, `runId`, `sequenceNumber`).
+**入站（经纪人存在时）。** 已收盘K线事件。预期信封字段：`eventId`、`eventType`、`schemaVersion`、`occurredAt`、`correlationId`、`causationId`、`producer`、`payload`（标的、OHLC、`runId`、`sequenceNumber`）。
 
-**Outbound.** One recommendation per candle. Required `payload` fields per platform docs: `recommendationId`, `sourceEventId`, `runId`, `secretKey`, `strategyId`, `accountId`, `groupId`, `sessionId`, `instrument`, `sequenceNumber`, `signal`, `confidence`, `suggestedQuantity`, `dataQuality`.
+**出站。** 每根K线一条推荐。按平台文档，`payload` 必填字段：`recommendationId`、`sourceEventId`、`runId`、`secretKey`、`strategyId`、`accountId`、`groupId`、`sessionId`、`instrument`、`sequenceNumber`、`signal`、`confidence`、`suggestedQuantity`、`dataQuality`。
 
-**Authentication.**
+**认证。**
 
-- to Kafka — SCRAM login/password, TLS;
-- `secretKey` in the recommendation payload — key issued by the instructor when the service was registered;
-- `GET /health` **without** authorization (assignment requirement).
+- 对 Kafka —— SCRAM 登录/密码，TLS；
+- 推荐 payload 中的 `secretKey` —— 服务注册时教师发放的密钥；
+- `GET /health` **无需**授权（作业要求）。
 
-HTTP Basic on nginx (`realm="Teacher platform"`) protects the **course website**, not our process. The service does not use those credentials.
+nginx 上的 HTTP Basic（`realm="Teacher platform"`）保护的是**课程网站**，不是我们的进程。服务不使用那些凭据。
 
-**Constraints.**
+**约束。**
 
-- do not hard-code internal platform container addresses;
-- each instance has its own `group.id`, otherwise students share a message partition;
-- `auto.offset.reset=earliest` on first connect;
-- repeating the same candle must yield the same decision (groundwork for semester-2 idempotency);
-- the answer must be fast: an LLM must not sit before `produce`.
+- 不要硬编码平台内部容器地址；
+- 每个实例有自己的 `group.id`，否则学生会共享消息分区；
+- 首次连接使用 `auto.offset.reset=earliest`；
+- 重复同一根K线必须得到同一决策（为第二学期幂等做铺垫）；
+- 回答必须快：LLM 不能挡在 `produce` 前面。
 
-**Errors and degradation.**
+**错误与降级。**
 
-| Situation | Behaviour |
+| 情况 | 行为 |
 |---|---|
-| No `KAFKA_BOOTSTRAP_SERVERS` / login / topic | health: `kafka=DOWN`, overall status `DEGRADED`, process stays up |
-| Broker unreachable | health `DOWN`, reconnect; HTTP health is still 200 |
-| Incomplete candle sequence | `HOLD`, `confidence=0`, `dataQuality` is not `OK` |
-| Unknown instrument | ignore or `HOLD` with a reason in `metadata` (to be clarified) |
-| Stale `secretKey` | the platform rejects the recommendation; the service learns this from a result event once that is wired |
+| 没有 `KAFKA_BOOTSTRAP_SERVERS` / 登录 / 主题 | health：`kafka=DOWN`，总体状态 `DEGRADED`，进程继续运行 |
+| 经纪人不可达 | health `DOWN`，重连；HTTP health 仍为 200 |
+| K线序列不完整 | `HOLD`，`confidence=0`，`dataQuality` 不是 `OK` |
+| 未知标的 | 忽略或带 `metadata` 原因的 `HOLD`（待澄清） |
+| 过期的 `secretKey` | 平台拒绝推荐；一旦接入结果事件，服务才能得知 |
 
-### 3.2. HTTP health (this repository)
+### 3.2. HTTP 健康检查（本仓库）
 
-- method: `GET /health`;
-- authorization: none;
-- successful transport: **always HTTP 200**, even if components are degraded;
-- body: `status`, `service`, `version`, `components`.
+- 方法：`GET /health`；
+- 授权：无；
+- 成功传输：**始终 HTTP 200**，即使组件降级；
+- 正文：`status`、`service`、`version`、`components`。
 
-Scaffold example (broker not issued yet):
+脚手架示例（经纪人尚未发放）：
 
 ```json
 {
@@ -238,107 +238,107 @@ Scaffold example (broker not issued yet):
 }
 ```
 
-### 3.3. Language model (star, not in the scaffold)
+### 3.3. 语言模型（星星，不在脚手架中）
 
-- direction: outbound HTTPS after `produce`;
-- model input: the already accepted decision and bar features, not “decide for me”;
-- output: a bounded adjustment to the next `confidence`;
-- authentication: API key from the environment;
-- error / timeout: adjustment 0.
+- 方向：`produce` 之后的出站 HTTPS；
+- 模型输入：已经接受的决策与K线特征，而不是「替我决定」；
+- 输出：对下一根 `confidence` 的有界微调；
+- 认证：来自环境的 API 密钥；
+- 错误 / 超时：微调为 0。
 
-### Assumptions and open questions
+### 假设与未决问题
 
-1. **Exact candle JSON** is not yet contracted by code in this repository. The reference is the stand chapter “Closed candle event”. Open until the broker assignment.
-2. The recommendation-result topic name and registration heartbeat will come from instructor docs, not guessed.
-3. `accountId` / `groupId` / `sessionId` are issued by the instructor; `.env.example` has placeholders.
-4. The platform does not send real orders — a documentation fact, not a hypothesis.
-5. An LLM is not a criterion of assignment 1.
+1. **精确的K线 JSON** 尚未由本仓库代码约定。参考实验台章节「Closed candle event」。在经纪人作业之前保持开放。
+2. 推荐结果主题名与注册心跳来自教师文档，不猜测。
+3. `accountId` / `groupId` / `sessionId` 由教师发放；`.env.example` 中是占位符。
+4. 平台不发送真实订单 —— 这是文档事实，不是假设。
+5. LLM 不是作业 1 的评判标准。
 
 ---
 
-## 4. Solution composition
+## 4. 方案组成
 
-Only nodes this service **actually** needs. Assignment 1 does not introduce a separate UI or its own DBMS: there is nothing to fill a screen with, and nothing that must survive restarts until the persistence assignment.
+只列出本服务**实际**需要的节点。作业 1 不引入单独 UI 或自有 DBMS：没有可填满屏幕的内容，在 persistence 作业之前也没有必须跨重启存活的数据。
 
-| Component | Purpose | Responsibility |
+| 组件 | 用途 | 职责 |
 |---|---|---|
-| **Server application (Cangjie executable)** | the only runnable node | HTTP health, process lifecycle, later the “candle → decision → produce” loop |
-| **Strategy module (same process)** | walk-forward, RSI setup, success formula | does not know HTTP or Kafka headers |
-| **Message broker (course Kafka)** | event transport | owned by the stand; our service is a client |
-| **Environment configuration** | thresholds, addresses, secrets | all values from env, zero secrets in Git |
-| **Docker container** | run without an IDE | Cangjie image, health port, SIGTERM |
-| **Project document + README** | intent and reproduction | live in the same repository |
+| **服务端应用（Cangjie 可执行文件）** | 唯一可运行节点 | HTTP 健康检查、进程生命周期，稍后是「K线 → 决策 → produce」循环 |
+| **策略模块（同一进程）** | walk-forward、RSI 形态、成功公式 | 不知道 HTTP 或 Kafka 头 |
+| **消息经纪人（课程 Kafka）** | 事件传输 | 由实验台拥有；我们的服务是客户端 |
+| **环境配置** | 阈值、地址、密钥 | 所有值来自环境，Git 中零密钥 |
+| **Docker 容器** | 不依赖 IDE 运行 | Cangjie 镜像、健康端口、SIGTERM |
+| **项目文档 + README** | 意图与复现 | 放在同一仓库 |
 
-**Why there is no UI.** Portfolio observation already exists on the platform. A second dashboard is out of scope.
+**为什么没有 UI。** 投资组合观察已在平台上存在。第二个仪表盘不在范围内。
 
-**Why there is no database in the scaffold.** A window of `N+K` one-minute candles is kept in memory. Persistence is a separate closed semester-1 assignment (`semester-1-persistence`). When it opens, a storage node appears — not earlier.
+**为什么脚手架没有数据库。** `N+K` 根一分钟K线的窗口保存在内存中。持久化是第一学期单独关闭的作业（`semester-1-persistence`）。该作业开放时才出现存储节点 —— 不会更早。
 
-**Why there is no separate “ML service”.** The success formula is ordinary arithmetic over OHLC. A dedicated inference runtime is not needed.
+**为什么没有单独的「ML 服务」。** 成功公式是对 OHLC 的普通算术。不需要专用推理运行时。
 
-Diagram:
+示意图：
 
 ```
-[instructor / data vendor]
-              │ candles
+[教师 / 数据供应商]
+              │ K线
               ▼
-         [stand Kafka]
+         [实验台 Kafka]
           │           ▲
-   consume│           │ produce recommendation
+   consume│           │ produce 推荐
           ▼           │
-     [quiet-water process: strategy + std.net health]
+     [quiet-water 进程：策略 + std.net health]
           │
-          └── GET /health  ← curl / Docker / instructor
+          └── GET /health  ← curl / Docker / 教师
 ```
 
 ---
 
-## 5. Roles and responsibility
+## 5. 角色与职责
 
-Only roles without which the project cannot be explained. “Product owner”, “security analyst”, “devops of a separate company” are not introduced.
+只保留没有它们就无法解释项目的角色。不引入「产品负责人」「安全分析师」「独立公司的运维」。
 
-### People
+### 人
 
-| Role | Who | Responsibility |
+| 角色 | 谁 | 职责 |
 |---|---|---|
-| **Customer** | course instructor | formulates the event contract, opens assignments, starts a run, watches portfolios |
-| **Developer** | student `llnightll` | document, scaffold, algorithm, secrets not in Git, service answers candles |
-| **Operator** | the same student in the runner role | builds the image or uses `cjpm`, sets env, watches health and logs, stops the process |
-| **External-system administrator** | instructor-platform administrator | Kafka, accounts, topics, keys; our repository does not manage that |
-| **Market-data owner / vendor** | stand vendor (not the student) | historical or realtime candles; does not connect to `quiet-water` directly |
+| **客户** | 课程教师 | 制定事件契约、开放作业、启动运行、观察投资组合 |
+| **开发者** | 学生 `llnightll` | 文档、脚手架、算法、密钥不进 Git、服务回答K线 |
+| **运维** | 同一学生作为运行者 | 构建镜像或使用 `cjpm`、设置环境、观察 health 与日志、停止进程 |
+| **外部系统管理员** | 教师平台管理员 | Kafka、账号、主题、密钥；我们的仓库不管理这些 |
+| **行情所有者 / 供应商** | 实验台供应商（不是学生） | 历史或实时K线；不直接连接到 `quiet-water` |
 
-### Machines
+### 机器
 
-| Role | Responsibility |
+| 角色 | 职责 |
 |---|---|
-| Service `quiet-water` | decision and health |
-| Platform | candle stream, key check, virtual portfolio |
-| Kafka | delivery, not business logic |
+| 服务 `quiet-water` | 决策与健康检查 |
+| 平台 | K线流、密钥校验、虚拟投资组合 |
+| Kafka | 投递，不是业务逻辑 |
 
-There is no “user of our service UI”: UI belongs to the platform.
+没有「我们服务 UI 的用户」：UI 属于平台。
 
 ---
 
-## 6. Tooling choices
+## 6. 工具选择
 
-| Area | Choice | Why this, not something else |
+| 领域 | 选择 | 为什么是这个，而不是别的 |
 |---|---|---|
-| Language | **Cangjie 1.2.0** (`cjc`) | chosen for this repository; static typing fits a JSON event contract; local SDK and container share the same toolchain |
-| Package / build | **`cjpm`** (`cjpm.toml`) | official Cangjie package manager: `cjpm test`, `cjpm build`, `cjpm run` without an IDE |
-| HTTP | **`std.net` TCP** (`TcpServerSocket`) | assignment 1 only needs `GET /health`; `stdx.net.http` is not required for the scaffold |
-| Serialization | **explicit JSON DTO** (`HealthResponse`) | the health body is built in code; no hidden reflection mapper in the scaffold |
-| Broker | **course Kafka** of the platform | the stand has no other transport; the client appears in the broker assignment, not in the scaffold |
-| DBMS | **none in assignment 1** | appears with the persistence assignment; Postgres is not pulled in “for later” |
-| Documentation | **Markdown in `docs/`** | assignment requirement: the document is versioned with the code; Confluence/Wiki would split intent from the repository |
-| Tasks | **practice on `omsu.7bits.it` + Git commits** | a separate Jira for one student service is not needed |
-| Git hosting | wherever the student publishes the course repository | the instructor issues / accepts the URL; hosting is not hard-coded |
-| Tests | **`cjpm test`** (`*_test.cj` next to DTO/HTTP) | `/health` JSON and request parsing without binding a network port |
-| CI | **`cjpm` and Docker commands in the README** | a separate cloud CI is optional while the instructor builds locally or in a container |
-| Container | **`zxilly/cangjie:nightly` → `nightly-slim`** | compile in the SDK image, run a native binary as PID 1 so `docker stop` delivers SIGTERM |
-| Local run | `cjpm run` or Docker | without an IDE; on Windows the binary is `target\release\bin\main.exe` |
-| Secrets | **environment variables**, sample `.env.example` | passwords and `secretKey` are not committed |
-| LLM | not a scaffold dependency | the star is described; it is not in `cjpm.toml` |
+| 语言 | **Cangjie 1.2.0**（`cjc`） | 为本仓库选定；静态类型适合 JSON 事件契约；本机 SDK 与容器共用同一工具链 |
+| 包 / 构建 | **`cjpm`**（`cjpm.toml`） | 官方 Cangjie 包管理器：不依赖 IDE 即可 `cjpm test`、`cjpm build`、`cjpm run` |
+| HTTP | **`std.net` TCP**（`TcpServerSocket`） | 作业 1 只需要 `GET /health`；脚手架不需要 `stdx.net.http` |
+| 序列化 | **显式 JSON DTO**（`HealthResponse`） | health 正文在代码中构造；脚手架没有隐藏的反射映射器 |
+| 经纪人 | 平台的**课程 Kafka** | 实验台没有其他传输；客户端出现在经纪人作业中，而不是脚手架 |
+| DBMS | **作业 1 中没有** | 随 persistence 作业出现；不为「以后」提前引入 Postgres |
+| 文档 | **`docs/` 中的 Markdown** | 作业要求：文档与代码同版本；Confluence/Wiki 会把意图与仓库拆开 |
+| 任务 | **`omsu.7bits.it` 上的练习 + Git 提交** | 一个学生服务不需要单独的 Jira |
+| Git 托管 | 学生发布课程仓库的位置 | 教师发放 / 接受 URL；托管不硬编码 |
+| 测试 | **`cjpm test`**（DTO/HTTP 旁的 `*_test.cj`） | `/health` JSON 与请求解析，不绑定网络端口 |
+| CI | README 中的 **`cjpm` 与 Docker 命令** | 在教师本机或容器构建时，单独的云 CI 是可选的 |
+| 容器 | **`zxilly/cangjie:nightly` → `nightly-slim`** | 在 SDK 镜像中编译，以原生二进制作为 PID 1 运行，使 `docker stop` 能送达 SIGTERM |
+| 本机运行 | `cjpm run` 或 Docker | 不依赖 IDE；Windows 上二进制为 `target\release\bin\main.exe` |
+| 密钥 | **环境变量**，样例 `.env.example` | 密码和 `secretKey` 不提交 |
+| LLM | 不是脚手架依赖 | 星星已描述；它不在 `cjpm.toml` 中 |
 
-Alternatives rejected for the scaffold:
+为脚手架否决的替代方案：
 
-- Kotlin / Ktor / Gradle / a JVM image — that is a different repository stack, not this Cangjie implementation;
-- wiring Kafka “just in case” in assignment 1 — would not build without issued keys and would break “scaffold without secrets”.
+- Kotlin / Ktor / Gradle / JVM 镜像 —— 那是另一仓库的技术栈，不是本 Cangjie 实现；
+- 在作业 1 中「以防万一」接入 Kafka —— 没有发放密钥时无法构建，也会破坏「没有密钥的脚手架」。
