@@ -1,0 +1,14 @@
+target/
+*.cjo
+*.a
+*.so
+*.dylib
+*.dll
+incremental-cache.json
+*-cache.json
+.env
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
