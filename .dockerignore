@@ -1,0 +1,10 @@
+.git
+.github
+.idea
+.vscode
+.cursor
+target
+docs
+*.md
+.env
+**/*_test.cj
